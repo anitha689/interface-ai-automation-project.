@@ -1,0 +1,235 @@
+from src.models import (
+    AgentUnavailableError,
+    Criterion,
+    CriterionKind,
+    EligibilityDetermination,
+    ErrorCode,
+    PatientRef,
+    Reason,
+    RejectedVerdict,
+    Status,
+    TraceEvent,
+    TrialCriteria,
+    ValidationCode,
+    Verdict,
+    WorkflowConfig,
+    WorkflowState,
+)
+
+ELIGIBILITY_AGENTS = ('demographics', 'history', 'interaction')
+VERDICT_VALUES = {v.value for v in Verdict}
+KIND_VALUES = {k.value for k in CriterionKind}
+
+
+class Workflow:
+
+    def __init__(self, agents, config):
+        self._agents = agents
+        self._config = config or WorkflowConfig()
+
+    # ------------------------------------------------------------------ main
+    def assess(self, patient, trial):
+        patient, trial = self._coerce(patient, trial)
+        if not self._request_ok(patient, trial):
+            return self._error(patient, trial)
+
+        state = WorkflowState()
+        criteria = {c.id: c for c in trial.criteria}
+        outage = set()
+
+        # 1. Ask each specialist that owns at least one criterion.
+        needed = [n for n in ELIGIBILITY_AGENTS
+                  if any(c.agent == n for c in trial.criteria)]
+        for name in needed:
+            result, ok = self._call_with_retry(name, patient, trial, state)
+            if not ok:
+                outage.update(c.id for c in trial.criteria if c.agent == name)
+                continue
+            self._validate(name, result, criteria, patient, state)
+
+        # 2. Resolve each criterion (fail-closed).
+        rejected_ids = {r.criterion_id for r in state.rejected}
+        rows, met_ex, unmet_in, open_ex, open_in = [], [], [], [], []
+        for c in trial.criteria:
+            answers = set(state.validated.get(c.id, []))
+            if c.id in outage or c.id in rejected_ids or len(answers) != 1:
+                verdict = Verdict.UNKNOWN.value      # missing, invalid or conflicting
+            else:
+                verdict = answers.pop()
+            rows.append({'criterion_id': c.id, 'kind': c.kind,
+                         'agent': c.agent, 'verdict': verdict})
+
+            is_exclusion = c.kind == CriterionKind.EXCLUSION.value
+            if verdict == Verdict.UNKNOWN.value:
+                (open_ex if is_exclusion else open_in).append(c)
+            elif is_exclusion and verdict == Verdict.MET.value:
+                met_ex.append(c)
+            elif not is_exclusion and verdict == Verdict.NOT_MET.value:
+                unmet_in.append(c)
+
+        # 3. Final decision.
+        primary = None
+        if met_ex:
+            status, reason = Status.INELIGIBLE, Reason.EXCLUSION_MET
+            primary = min(met_ex, key=lambda c: (-(c.severity or 0), c.id)).id
+        elif unmet_in:
+            status, reason = Status.INELIGIBLE, Reason.INCLUSION_NOT_MET
+        elif open_ex or open_in:
+            if len(open_ex) >= self._config.undetermined_review_min:
+                status = Status.COORDINATOR_REVIEW
+            else:
+                status = Status.UNDETERMINED
+            if any(c.id in outage for c in open_ex + open_in):
+                reason = Reason.AGENT_UNAVAILABLE
+            elif open_ex:
+                reason = Reason.UNKNOWN_EXCLUSION
+            else:
+                reason = Reason.UNKNOWN_INCLUSION
+        else:
+            status, reason = Status.ELIGIBLE, None
+
+        # 4. Coverage: fetched AFTER the decision and never used in it.
+        band, ok = self._call_with_retry('coverage', patient, trial, state)
+        band = band if ok and isinstance(band, str) else None
+
+        return EligibilityDetermination(
+            patient_ref=patient.id,
+            trial_id=trial.trial_id,
+            status=status.value,
+            criteria=rows,
+            rejected_verdicts=state.rejected,
+            coverage_band=band,
+            reason=reason.value if reason else None,
+            primary_exclusion=primary,
+            error=None,
+            trace=state.trace,
+        )
+
+    # --------------------------------------------------------------- helpers
+    def _call_with_retry(self, name, patient, trial, state):
+        """Returns (result, ok). One trace entry per attempt."""
+        agent = self._agents.get(name) if self._agents else None
+        attempts = 1 + max(0, int(self._config.max_retries))
+        for attempt in range(1, attempts + 1):
+            try:
+                if agent is None:
+                    raise AgentUnavailableError(f'{name} not registered')
+                result = agent.evaluate(patient, trial)
+            except AgentUnavailableError:
+                state.trace.append(TraceEvent(step=name, attempt=attempt, status='failed'))
+                continue
+            state.trace.append(TraceEvent(step=name, attempt=attempt, status='success'))
+            state.called_agents.add(name)
+            return result, True
+        state.degraded_agents.add(name)
+        return None, False
+
+    def _validate(self, name, result, criteria, patient, state):
+        verdicts = list(getattr(result, 'verdicts', None) or [])
+        counts = {}
+        for v in verdicts:
+            key = getattr(v, 'criterion_id', None)
+            counts[key] = counts.get(key, 0) + 1
+        catalogue = set(patient.evidence_catalogue or [])
+
+        for v in verdicts:
+            code = self._check(name, v, criteria, catalogue, counts)
+            if code is not None:
+                state.rejected.append(RejectedVerdict(
+                    criterion_id=str(getattr(v, 'criterion_id', None)),
+                    agent=str(getattr(v, 'agent', name)),
+                    code=code.value,
+                ))
+            else:
+                state.validated.setdefault(v.criterion_id, []).append(
+                    Verdict(v.verdict).value)
+
+    @staticmethod
+    def _check(name, v, criteria, catalogue, counts):
+        cid = getattr(v, 'criterion_id', None)
+        crit = criteria.get(cid)
+        if crit is None:
+            return ValidationCode.UNKNOWN_CRITERION
+        if getattr(v, 'agent', None) != name or crit.agent != name:
+            return ValidationCode.UNRELATED_CRITERION
+        if counts.get(cid, 0) > 1:
+            return ValidationCode.DUPLICATE
+
+        verdict = getattr(v, 'verdict', None)
+        if verdict not in VERDICT_VALUES:
+            return ValidationCode.OUT_OF_RANGE
+        value = getattr(v, 'value', None)
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return ValidationCode.OUT_OF_RANGE
+            if crit.value_range is not None:
+                lo, hi = crit.value_range
+                if (lo is not None and value < lo) or (hi is not None and value > hi):
+                    return ValidationCode.OUT_OF_RANGE
+
+        refs = getattr(v, 'evidence_refs', None)
+        if refs is None:
+            refs = []
+        if not isinstance(refs, (list, tuple)) or any(r not in catalogue for r in refs):
+            return ValidationCode.UNSUPPORTED_EVIDENCE
+        if verdict != Verdict.UNKNOWN.value and not refs:
+            return ValidationCode.UNSUPPORTED_EVIDENCE
+        return None
+
+    @staticmethod
+    def _coerce(patient, trial):
+        """Accept plain dicts as well as the dataclasses."""
+        try:
+            if isinstance(patient, dict):
+                patient = PatientRef(
+                    id=patient.get('id'),
+                    record=patient.get('record', ''),
+                    evidence_catalogue=patient.get('evidence_catalogue', []),
+                )
+            if isinstance(trial, dict):
+                crits = [Criterion(**c) if isinstance(c, dict) else c
+                         for c in (trial.get('criteria') or [])]
+                trial = TrialCriteria(trial_id=trial.get('trial_id'), criteria=crits)
+        except TypeError:
+            pass  # left as-is, so _request_ok rejects it
+        return patient, trial
+
+    @staticmethod
+    def _request_ok(patient, trial):
+        if not isinstance(patient, PatientRef) or not isinstance(trial, TrialCriteria):
+            return False
+        if not isinstance(patient.id, str) or not patient.id.strip():
+            return False
+        if not isinstance(patient.evidence_catalogue, (list, tuple)):
+            return False
+        if not isinstance(trial.trial_id, str) or not trial.trial_id.strip():
+            return False
+        if not isinstance(trial.criteria, (list, tuple)) or not trial.criteria:
+            return False
+        seen = set()
+        for c in trial.criteria:
+            if not isinstance(c, Criterion):
+                return False
+            if not isinstance(c.id, str) or not c.id or c.id in seen:
+                return False
+            if c.kind not in KIND_VALUES or c.agent not in ELIGIBILITY_AGENTS:
+                return False
+            seen.add(c.id)
+        return True
+
+    @staticmethod
+    def _error(patient, trial):
+        pid = getattr(patient, 'id', None) if not isinstance(patient, dict) else patient.get('id')
+        tid = getattr(trial, 'trial_id', None) if not isinstance(trial, dict) else trial.get('trial_id')
+        return EligibilityDetermination(
+            patient_ref=pid if isinstance(pid, str) else None,
+            trial_id=tid if isinstance(tid, str) else None,
+            status=Status.ERROR.value,
+            criteria=[],
+            rejected_verdicts=[],
+            coverage_band=None,
+            reason=None,
+            primary_exclusion=None,
+            error=ErrorCode.INVALID_REQUEST.value,
+            trace=[],
+        )

@@ -1,0 +1,44 @@
+{
+  "run_id": "login_to_saucedemo_20260923_220104",
+  "overall_status": "failed",
+  "started_at": "2026-09-23T22:01:04.861137",
+  "finished_at": "2026-09-23T22:01:37.039712",
+  "steps": [
+    {
+      "step_number": 1,
+      "action": "goto",
+      "description": "Open the Sauce Demo login page",
+      "status": "success",
+      "timestamp": "2026-09-23T22:01:06.769250",
+      "error": null,
+      "screenshot": "step_01_success.png"
+    },
+    {
+      "step_number": 2,
+      "action": "type",
+      "description": "Type username into the username field",
+      "status": "success",
+      "timestamp": "2026-09-23T22:01:06.853793",
+      "error": null,
+      "screenshot": "step_02_success.png"
+    },
+    {
+      "step_number": 3,
+      "action": "type",
+      "description": "Type password into the password field",
+      "status": "success",
+      "timestamp": "2026-09-23T22:01:06.915126",
+      "error": null,
+      "screenshot": "step_03_success.png"
+    },
+    {
+      "step_number": 4,
+      "action": "click",
+      "description": "Click the login button",
+      "status": "failed",
+      "timestamp": "2026-09-23T22:01:36.981845",
+      "error": "Page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"[data-test='does-not-exist']\")\n",
+      "screenshot": "step_04_failed.png"
+    }
+  ]
+}

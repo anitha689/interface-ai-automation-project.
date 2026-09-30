@@ -1,0 +1,53 @@
+{
+  "run_id": "login_to_saucedemo_20260923_211741",
+  "overall_status": "success",
+  "started_at": "2026-09-23T21:17:41.125859",
+  "finished_at": "2026-09-23T21:17:48.716507",
+  "steps": [
+    {
+      "step_number": 1,
+      "action": "goto",
+      "description": "Open the Sauce Demo login page",
+      "status": "success",
+      "timestamp": "2026-09-23T21:17:44.116062",
+      "error": null,
+      "screenshot": "step_01_success.png"
+    },
+    {
+      "step_number": 2,
+      "action": "type",
+      "description": "Type username into the username field",
+      "status": "success",
+      "timestamp": "2026-09-23T21:17:44.297094",
+      "error": null,
+      "screenshot": "step_02_success.png"
+    },
+    {
+      "step_number": 3,
+      "action": "type",
+      "description": "Type password into the password field",
+      "status": "success",
+      "timestamp": "2026-09-23T21:17:44.402734",
+      "error": null,
+      "screenshot": "step_03_success.png"
+    },
+    {
+      "step_number": 4,
+      "action": "click",
+      "description": "Click the login button",
+      "status": "success",
+      "timestamp": "2026-09-23T21:17:45.080544",
+      "error": null,
+      "screenshot": "step_04_success.png"
+    },
+    {
+      "step_number": 5,
+      "action": "finish",
+      "description": "Reached products page, goal achieved",
+      "status": "success",
+      "timestamp": "2026-09-23T21:17:45.291706",
+      "error": null,
+      "screenshot": "step_05_success.png"
+    }
+  ]
+}
