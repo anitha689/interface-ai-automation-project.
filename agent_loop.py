@@ -1,7 +1,7 @@
 """
 Goal-driven agent loop (Section 3.1 of the assignment).
 
-Observes the page (screenshot + interactive elements), asks Claude what to do next,
+Observes the page (screenshot + interactive elements), asks Gemini what to do next,
 executes that action with Playwright, and repeats until the goal is met or we hit a
 stopping condition (max steps / stuck).
 
@@ -79,7 +79,7 @@ class Agent:
         return screenshot_b64, elements
 
     def decide(self, screenshot_b64: str, elements: list[dict], page_url: str) -> dict:
-        """Ask Claude what to do next, given the current screen. Returns a structured action."""
+        """Ask Gemini what to do next, given the current screen. Returns a structured action."""
         elements_text = json.dumps(elements, indent=2)
 
         system_prompt = f"""You are controlling a web browser to accomplish a goal.
@@ -111,7 +111,7 @@ element_index must match the "index" field from the elements list provided.
         return json.loads(raw_text)
 
     def act(self, page: Page, action: dict, elements: list[dict]):
-        """Executes the action Claude chose, and records it for the artifact/log."""
+        """Executes the action Gemini chose, and records it for the artifact/log."""
         step_record = {"action": action, "url_before": page.url}
 
         if action["action"] == "click":
@@ -168,7 +168,7 @@ element_index must match the "index" field from the elements list provided.
 if __name__ == "__main__":
     agent = Agent(
         goal="Log in with username 'standard_user' and password 'secret_sauce', "
-        "then add the first product to the cart and reach the cart page.",
+        "then reach the products page.",
         start_url="https://www.saucedemo.com",
     )
     result = agent.run()
